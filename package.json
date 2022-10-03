@@ -1,0 +1,34 @@
+{
+  "name": "@ralphwetzel/node-red-ds2482-mcu",
+  "version": "1.0.0",
+  "description": "DS2482 I2C 1-Wire Master controller for Node-RED w/ MCU support",
+  "main": "ds2482.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ralphwetzel/node-red-ds2482-mcu.git"
+  },
+  "dependencies": {
+    "fs-extra": "^10.1.0"
+  },
+  "node-red": {
+    "nodes": {
+      "DS2482": "ds2482.js"
+    }
+  },
+  "keywords": [
+    "Node-RED",
+    "MCU",
+    "DS2482",
+    "I2C",
+    "1-Wire"
+  ],
+  "author": "Ralph Wetzel",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ralphwetzel/node-red-ds2482-mcu/issues"
+  },
+  "homepage": "https://github.com/ralphwetzel/node-red-ds2482-mcu#readme"
+}

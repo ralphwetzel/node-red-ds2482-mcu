@@ -1,0 +1,16 @@
+{
+	"include": [
+		"../devices/manifest.json"
+	],
+	"modules": {
+		"*": [
+			"./node",
+			"./ds2482",
+			"./commands",
+			"./buffer"
+		]
+	},
+	"preload": [
+		"node"
+	]
+}

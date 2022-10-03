@@ -1,0 +1,23 @@
+{
+	"include": [
+		"$(MODULES)/data/crc/manifest.json"
+	],
+	"modules": {
+		"*": [
+			"./ds18b20",
+			"./ds2408",
+			"./ds2438",
+			"./generic"
+		],
+		"buffer": "../mcu/buffer"
+	},
+	"config": {
+		"ds2482": {
+			"devices": {
+				"26": "ds2438",
+				"28": "ds18b20",
+				"29": "ds2408"
+			}
+		}
+	}
+}

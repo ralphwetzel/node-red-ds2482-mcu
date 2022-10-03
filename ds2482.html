@@ -1,0 +1,462 @@
+<!--
+
+  This HMI of this node is based on node-red-contrib-owfs
+  https://github.com/njh/node-red-contrib-owfs/blob/main/owfs.html
+
+  /***
+  Copyright 2014-2016 Nicholas Humfrey
+  Copyright 2013 IBM Corp.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+  ***/
+
+  Adaptations to node-red-mcu by @ralphwetzel
+  https://github.com/ralphwetzel/node-red-ds2482-mcu
+  License: MIT
+
+-->
+
+<script type="text/javascript" src="resources/@ralphwetzel/node-red-ds2482-mcu/date-and-time/date-and-time.min.js"></script>
+
+<script type="text/x-red" data-template-name="ds2482">
+    <div class="form-row">
+        <label for="node-input-controller"><i class="icon-globe"></i> Controller</label>
+        <input id="node-input-controller" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-name"><i class="icon-tag"></i> Name</label>
+        <input type="text" id="node-input-name" placeholder="Name" />
+    </div>
+    <div class="form-row">
+        <label for="node-input-mode"><i class="icon-resize-horizontal"></i> Mode</label>
+        <select id="node-input-mode" style="width:70%">
+            <option value="read">Read</option>
+            <option value="write">Write</option>
+            <!-- <option value="presence">Presence</option> -->
+        </select>
+    </div>
+<!--
+    <div class="form-row">
+        <label>&nbsp;</label>
+        <input type="checkbox" id="node-input-uncached" value="true" style="display: inline-block; width: auto; vertical-align: top;">
+        <label for="node-input-uncached" style="width: 70%;">Request Uncached Values</label>
+    </div>
+-->
+
+    <div class="form-row" style="margin-top: 25px">
+        <div class="btn-group">
+            <a class="btn btn-mini dropdown-toggle" data-toggle="dropdown" href="#"><i class="icon-align-justify"></i> Select <span class="caret"></span></a>
+            <ul class="dropdown-menu">
+                <li><a id='node-input-select-none' href="#">None</a></li>
+                <li><a id='node-input-select-all' href="#">All</a></li>
+                <li><a id='node-input-select-temperature' href="#">All Temperature</a></li>
+                <li><a id='node-input-select-humidity' href="#">All Humidity</a></li>
+            </ul>
+        </div>
+        <a class="btn btn-mini" id="node-input-refresh-paths" href="#"><i class="icon-refresh"></i> Refresh</a>
+        <span id="owfs-status" style="position: absolute; right: 20px"><small></small></span>
+    </div>
+
+    <div class="form-row">
+        <div id="node-input-paths-container-div" style="border-radius: 5px; height: 370px; padding: 5px; border: 1px solid #ccc; overflow-y:scroll;">
+        <ol id="node-input-paths-container" style="list-style-type:none; margin: 0;">
+        </ol>
+        </div>
+    </div>
+</script>
+
+<script type="text/x-red" data-help-name="ds2482">
+    <p>A node for talking to <a href="http://www.maximintegrated.com/en/products/comms/one-wire.html" target="_new">1-wire</a> devices using a DS2482 I2C 1-Wire bridge.</p>
+    <p>One or more device paths can be selected in the node edit dialog. Upon receiving a message on the input the node, it will request each of the values in turn from the bridge and places the reading in <b>msg.payload</b>.</p>
+    <p>Alternatively a device path can be specified in the <b>msg.topic</b> field, for example <code>28.0080BE21AA00/temperature</code>. This will override any paths selected in the edit dialog.</p>
+    <p>To trigger reading sensors periodically, use an Inject node to send messages every X seconds.</p>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType('ds2482',{
+        category: 'MCU',
+        defaults: {
+            name: {value:""},
+            // uncached: {value:false},
+            mode: {value:"read",validate:RED.validators.regex(/^read|write|presence$/)},
+            controller: {value: "", type: 'ds2482controller'},
+            paths: {value:[]}
+        },
+        color:"#C0DEED",
+        inputs:1,
+        outputs:1,
+        icon: "1w.png",
+        label: function() {
+            let label = this.name||"DS2482";
+            if (this.mode == "read") {
+                label = `${label} >`
+            } else if (this.mode == "write") {
+                label = `> ${label}`
+            }
+            return label;
+        },
+        paletteLabel: function() {
+            return "DS2482";
+        },
+        labelStyle: function() {
+            return this.name?"node_label_italic":"";
+        },
+        oneditprepare: function() {
+            function generateRow(i,path) {
+                var container = $('<li/>',{style:"margin:0; padding:8px 0px; border-bottom: 1px solid #ccc;"});
+                var row = $('<div/>',{class:"node-input-path-row"}).appendTo(container);
+                var row2 = $('<div/>',{style:"padding-top: 5px;"}).appendTo(container);
+
+                var checkBox = $('<input/>',{id:"node-input-path-cb"+i,type:"checkbox",style:"margin: 5px; width: auto"}).appendTo(row);
+                checkBox.data('path', path);
+                var pathField = $('<label/>',{for:"node-input-path-cb"+i,style:"width:auto"}).text(path).appendTo(row);
+                $("#node-input-paths-container").append(container);
+            }
+
+            var node = this;
+            function refreshPaths(currentPaths) {
+
+                if (!node.controller) {
+                    $('#owfs-status small').html("Controller definition missing.");
+                    return;
+                } else {
+                    $('#owfs-status small').html("Connecting...");
+                }
+
+                params = {
+                    "id": node.id,
+                    "controller": node.controller
+                }
+
+                $("#node-input-paths-container").empty();
+                $.getJSON("ds2482/search?"+$.param(params)).done(function(data) {
+
+                    if (data['error']) {
+                        $('#owfs-status small').html("Error: "+data['error']);
+                    } else {
+                        if (data["id"] == node.controller) {
+                            update_paths_container(data["paths"], currentPaths, data["stamp"]);
+                        }
+                    }
+
+                }).fail(function(jqxhr) {
+                    if (jqxhr.status == 0) {
+                        $('#owfs-status small').html("Failed to connect to Node-RED");
+                    } else {
+                        $('#owfs-status small').html(jqxhr.status+": "+jqxhr.statusText);
+                    }
+                });
+            };
+
+            function update_paths_container(updatedPaths, currentPaths, stamp) {
+
+                stamp = stamp ? new Date(stamp * 1000) : new Date();
+
+                let devices = {};
+                for (let i=0, l=updatedPaths.length; i<l; i++) {
+                    let pp = updatedPaths[i].split("/");
+                    if (pp.length > 0) {
+                        let d = pp[0];
+                        if (d[0] == "/") {
+                            d = d.substring(1);
+                        }
+
+                        if (devices[d]) {
+                            devices[d] += 1;
+                        } else {
+                            devices[d] = 1;
+                        }
+                    }
+                }
+
+                $.each(updatedPaths, generateRow);
+                $('#node-input-paths-container input:checkbox').each( function() {
+                    var checkbox = $(this);
+                    if ($.inArray(checkbox.data('path'), currentPaths) != -1) {
+                        checkbox.prop('checked', true);
+                    }
+                });
+
+                let dev_count = Object.keys(devices).length
+
+                if (dev_count > 0) {
+                    $('#owfs-status small').html(dev_count + " devices @ " + date.format(stamp, 'YYYY/MM/DD HH:mm:ss') );
+                } else {
+                    $('#owfs-status small').html("No 1-wire devices found.");
+                }
+            }
+
+            RED.comms.subscribe("ds2482/pathupdate", function (topic, msg) {
+                let id = msg?.id;
+                if (id == node.controller) {
+                    let currentPaths = $('#node-input-paths-container input:checked').map( function() {
+                        return $(this).data('path');
+                    });
+                    update_paths_container(msg.paths, currentPaths, msg.stamp);
+                }
+            });
+
+            function switchDialogResize(ev,ui) {
+                console.log(ui.size.height);
+                $("#node-input-paths-container-div").css("height",(ui.size.height-190)+"px");
+            };
+
+            $( "#dialog" ).on("dialogresize", switchDialogResize);
+            $( "#dialog" ).one("dialogopen", function(ev) {
+                var size = $( "#dialog" ).dialog('option','sizeCache-switch');
+                if (size) {
+                    switchDialogResize(null,{size:size});
+                }
+            });
+            $( "#dialog" ).one("dialogclose", function(ev,ui) {
+                $( "#dialog" ).off("dialogresize",switchDialogResize);
+            });
+
+            $("#node-input-refresh-paths").click( function() {
+                var currentPaths = $('#node-input-paths-container input:checked').map( function() {
+                    return $(this).data('path');
+                });
+                refreshPaths(currentPaths);
+            });
+
+            $("#node-input-select-none").click( function() {
+                $('#node-input-paths-container input:checked').each( function() {
+                    $(this).prop('checked', false);
+                });
+            });
+
+            $("#node-input-select-all").click( function() {
+                $('#node-input-paths-container input:checkbox').each( function() {
+                    $(this).prop('checked', true);
+                });
+            });
+
+            function checkPathsMatching(regexp) {
+                $('#node-input-paths-container input:checkbox').each( function() {
+                    var checkbox = $(this);
+                    if (checkbox.data('path').match(regexp)) {
+                        checkbox.prop('checked', true);
+                    }
+                });
+            }
+
+            $("#node-input-select-temperature").click( function() {
+                checkPathsMatching(/\/temperature$/);
+            });
+
+            $("#node-input-select-humidity").click( function() {
+                checkPathsMatching(/\/humidity$/);
+            });
+
+            refreshPaths(this.paths);
+        },
+        oneditsave: function() {
+            this.paths = $('#node-input-paths-container input:checked').map( function() {
+                return $(this).data('path');
+            }).toArray();
+        },
+    });
+</script>
+
+<script type="text/x-red" data-template-name="ds2482controller">
+    <div class="form-row">
+        <label for="node-config-input-name"><i class="icon-tag"></i> Name</label>
+        <input type="text" id="node-config-input-name" placeholder="Name" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-config-input-data"><i class="icon-tag"></i> I2C: Data</label>
+        <input type="number" id="node-config-input-data" placeholder="GPIO Pin#" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-config-input-clock"><i class="icon-tag"></i> I2C: Clock</label>
+        <input type="number" id="node-config-input-clock" placeholder="GPIO Pin#" />
+    </div>
+
+
+    <div class="form-row">
+        <label for="node-config-input-hz"><i class="icon-tag"></i> I2C: Speed</label>
+        <input type="number" id="node-config-input-hz" placeholder="Hz" />
+    </div>
+
+    <div class="form-row">
+        <label for="node-config-input-address"><i class="icon-tag"></i> I2C: Address</label>
+        <input type="number" id="node-config-input-address" placeholder="I2C address of the DS2482" />
+    </div>
+
+<!--
+    <div class="form-row" style="margin-top: 25px">
+        <div class="btn-group">
+            <a class="btn btn-mini dropdown-toggle" data-toggle="dropdown" href="#"><i class="icon-align-justify"></i> Select <span class="caret"></span></a>
+            <ul class="dropdown-menu">
+                <li><a id='node-input-select-none' href="#">None</a></li>
+                <li><a id='node-input-select-all' href="#">All</a></li>
+                <li><a id='node-input-select-temperature' href="#">All Temperature</a></li>
+                <li><a id='node-input-select-humidity' href="#">All Humidity</a></li>
+            </ul>
+        </div>
+        <a class="btn btn-mini" id="node-input-refresh-paths" href="#"><i class="icon-refresh"></i> Refresh</a>
+        <span id="owfs-status"><small></small></span>
+    </div>
+    <div class="form-row">
+        <div id="node-input-paths-container-div" style="border-radius: 5px; height: 310px; padding: 5px; border: 1px solid #ccc; overflow-y:scroll;">
+        <ol id="node-input-paths-container" style="list-style-type:none; margin: 0;">
+        </ol>
+        </div>
+    </div>
+    
+-->
+</script>
+
+<script type="text/x-red" data-help-name="ds2482controller">
+    <p>A node to control a DS2482 I2C 1-Wire bridge.</p>
+</script>
+
+<script type="text/javascript">
+    RED.nodes.registerType('ds2482controller',{
+        category: 'config',
+        defaults: {
+            name: {value:""},
+            data: {value: "", required: true, validate:RED.validators.number()},
+            clock: {value: "", required: true, validate:RED.validators.number()},
+            hz: { value: "400000", validate:RED.validators.number()},
+            stop: { value: true},
+            timeout: { value: 50 },
+            address: { value: "", required: true, validate:RED.validators.number()}
+        },
+        label: function() {
+            return this.name||"DS2482 @ #" + this.data + "/#" + this.clock + ": 0x" + parseInt(this.address).toString(16);
+        },
+        paletteLabel: function() {
+            return "DS2482 Controller";
+        },
+        // oneditprepare: function() {
+        //     function generateRow(i,path) {
+        //         var container = $('<li/>',{style:"margin:0; padding:8px 0px; border-bottom: 1px solid #ccc;"});
+        //         var row = $('<div/>',{class:"node-input-path-row"}).appendTo(container);
+        //         var row2 = $('<div/>',{style:"padding-top: 5px;"}).appendTo(container);
+
+        //         var checkBox = $('<input/>',{id:"node-input-path-cb"+i,type:"checkbox",style:"margin: 5px; width: auto"}).appendTo(row);
+        //         checkBox.data('path', path);
+        //         var pathField = $('<label/>',{for:"node-input-path-cb"+i,style:"width:auto"}).text(path).appendTo(row);
+        //         $("#node-input-paths-container").append(container);
+        //     }
+
+        //     var node = this;
+        //     function refreshPaths(currentPaths) {
+        //         var params = {
+        //             "host": $('#node-input-host').val(),
+        //             "port": $('#node-input-port').val()
+        //         };
+
+        //         if (!params['host']) {
+        //             $('#owfs-status small').html("No host set");
+        //             return;
+        //         } else if (!params['port']) {
+        //             $('#owfs-status small').html("No port set");
+        //             return;
+        //         } else {
+        //             $('#owfs-status small').html("Connecting...");
+        //         }
+
+        //         $("#node-input-paths-container").empty();
+        //         $.getJSON("owfs/dirall?"+$.param(params)).done(function(data) {
+        //             if (data['error']) {
+        //                 $('#owfs-status small').html("Error: "+data['error']);
+        //             } else if (data['deviceCount'] > 0) {
+        //                 $.each(data["paths"], generateRow);
+        //                 $('#node-input-paths-container input:checkbox').each( function() {
+        //                     var checkbox = $(this);
+        //                     if ($.inArray(checkbox.data('path'), currentPaths) != -1) {
+        //                         checkbox.prop('checked', true);
+        //                     }
+        //                 });
+        //                 $('#owfs-status small').html("Successfully read "+data["deviceCount"]+" devices.");
+        //             } else {
+        //                 $('#owfs-status small').html("No 1-wire devices found.");
+        //             }
+        //         }).fail(function(jqxhr) {
+        //             if (jqxhr.status == 0) {
+        //                 $('#owfs-status small').html("Failed to connect to Node-RED");
+        //             } else {
+        //                 $('#owfs-status small').html(jqxhr.status+": "+jqxhr.statusText);
+        //             }
+        //         });
+        //     };
+
+        //     function switchDialogResize(ev,ui) {
+        //         $("#node-input-paths-container-div").css("height",(ui.size.height-260)+"px");
+        //     };
+
+        //     $( "#dialog" ).on("dialogresize", switchDialogResize);
+        //     $( "#dialog" ).one("dialogopen", function(ev) {
+        //         var size = $( "#dialog" ).dialog('option','sizeCache-switch');
+        //         if (size) {
+        //             switchDialogResize(null,{size:size});
+        //         }
+        //     });
+        //     $( "#dialog" ).one("dialogclose", function(ev,ui) {
+        //         $( "#dialog" ).off("dialogresize",switchDialogResize);
+        //     });
+
+        //     $("#node-input-refresh-paths").click( function() {
+        //         var currentPaths = $('#node-input-paths-container input:checked').map( function() {
+        //             return $(this).data('path');
+        //         });
+        //         refreshPaths(currentPaths);
+        //     });
+
+        //     $("#node-input-select-none").click( function() {
+        //         $('#node-input-paths-container input:checked').each( function() {
+        //             $(this).prop('checked', false);
+        //         });
+        //     });
+
+        //     $("#node-input-select-all").click( function() {
+        //         $('#node-input-paths-container input:checkbox').each( function() {
+        //             $(this).prop('checked', true);
+        //         });
+        //     });
+
+        //     function checkPathsMatching(regexp) {
+        //         $('#node-input-paths-container input:checkbox').each( function() {
+        //             var checkbox = $(this);
+        //             if (checkbox.data('path').match(regexp)) {
+        //                 checkbox.prop('checked', true);
+        //             }
+        //         });
+        //     }
+
+        //     $("#node-input-select-temperature").click( function() {
+        //         checkPathsMatching(/\/temperature$/);
+        //     });
+
+        //     $("#node-input-select-humidity").click( function() {
+        //         checkPathsMatching(/\/humidity$/);
+        //     });
+
+        //     refreshPaths(this.paths);
+        // },
+        // oneditsave: function() {
+        //     this.paths = $('#node-input-paths-container input:checked').map( function() {
+        //         return $(this).data('path');
+        //     }).toArray();
+        // },
+
+        // onbuildmcu: function() {
+            
+        // }
+    });
+</script>
+
