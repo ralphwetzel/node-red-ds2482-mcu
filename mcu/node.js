@@ -13,7 +13,7 @@ class DS2482Node extends Node {
 
   #controller;
   #mode;
-  #path;
+  #paths; // Array!
 
   static type = "ds2482";
 
@@ -48,16 +48,19 @@ class DS2482Node extends Node {
   onStart(config) {
     super.onStart(config);
 
-    this.#status("grey", "circle", "Idle");
+    this.#status("grey", "dot", "Idle");
 
     this.#mode = config.mode;
-    this.#path = config.path;
+    this.#paths = config.paths;
     this.#controller = RED.nodes.getNode(config.controller);
 
   }
 
   onMessage(msg) {
 
+    msg["ds2482"] ??= [];
+    let log = msg["ds2482"];
+    
     let self = this;
 
     function run(f) {
@@ -79,12 +82,11 @@ class DS2482Node extends Node {
 
     self.#status("blue", "dot", "Processing...", 5000);
 
-    let path = msg.topic ?? this.#path;
+    let path = msg?.topic?.length > 0 ? msg.topic : this.#paths;
     let ds = this.#controller.ds;
 
-    trace(msg.topic + "\n");
-    trace(this.#path + "\n");
-
+    // trace(msg.topic + "\n");
+    // trace(this.#paths + "\n");
 
     if (this.#mode === "read") {
 
@@ -94,12 +96,15 @@ class DS2482Node extends Node {
         result = [];
         path.forEach((p) => {
           let r = run(() => { return ds.readPath(p) });
-          if (r) {
-            result.push(r)
-          }
+
+          log.push({"path": p, "read": r})
+
+          result.push(r)
         })
       } else {
         result = run(() => { return ds.readPath(path) });
+        log.push({"path": path, "read": result})
+
       }
 
       msg.payload = result;
@@ -118,6 +123,7 @@ class DS2482Node extends Node {
           }
 
           if (v) {
+            log.push({"path": p, "write": v})
             run(() => { return ds.writePath(p, v) });
           }
         }
@@ -129,6 +135,7 @@ class DS2482Node extends Node {
           v = msg.payload;
         }
         if (v) {
+          log.push({"path": p, "write": v})
           run(() => { return ds.writePath(p, v) });
         }
       }
