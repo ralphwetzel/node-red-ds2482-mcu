@@ -64,6 +64,10 @@ class ds2438 {
         let crc;
         let sp;
 
+
+        bridge.matchROM(id);
+        bridge.writeData([self.#cmds.RECALL_SCRATCHPAD, page]);
+
         function r(b, i, p, l) {
             b.matchROM(i);
             b.writeData([self.#cmds.READ_SCRATCHPAD, p]);
