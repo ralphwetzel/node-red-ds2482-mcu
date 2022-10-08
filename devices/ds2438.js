@@ -38,6 +38,10 @@ class ds2438 {
         ADB: 6
     })
 
+    #error(id, msg) {
+        return new Error(`${id.substring(0,2)}.${id.substring(2)}: ${msg}`);
+    }
+
     temp_read(bridge, id) {
         bridge.matchROM(id);
         bridge.writeData([this.#cmds.CONVERT_TEMP]);
@@ -79,7 +83,15 @@ class ds2438 {
             crc = bridge.checkCRC(sp)
         } while (true == false) // ((crc === false) && count < 5)
 
-        return sp;
+        // in case the device is not present
+        // each byte reads 0xFF!
+        for (let i=sp.length; i--;) {
+            if (sp[i] != 0xFF) {
+                return sp;
+            }
+        }
+        return; // undefined
+
     }
 
     #write_sp(bridge, id, page, data, length) {
@@ -107,6 +119,9 @@ class ds2438 {
 
         // read first page, first byte
         let sp = this.#read_sp(bridge, id, 0, 1);
+        if (!sp) 
+            throw this.#error(id, "Device not present");
+
         let sc = sp.readUInt8(0);
 
         if (this.#bit_get(sc, register) == status) {
@@ -135,6 +150,9 @@ class ds2438 {
         // return this.volts_fetch(bridge, id);
         
         let sp = this.#read_sp(bridge, id, 0);
+        if (!sp) 
+            throw this.#error(id, "Device not present");
+
         let v = sp.readUInt16LE(3);
         return (.01 * v);
     }
@@ -152,6 +170,9 @@ class ds2438 {
         Timer.delay(50);
 
         let sp = this.#read_sp(bridge, id, 0);
+        if (!sp) 
+            throw this.#error(id, "Device not present");
+
         let v = sp.readUInt16LE(5);
         return (.2441 * v);     // resolution: 0.2441mV
     }
@@ -166,9 +187,7 @@ class ds2438 {
         let _vad = this.vad(bridge, id);
         let _vdd = this.vdd(bridge, id);
 
-        if (!_t || !_vad || !_vdd || _vdd<.01) {
-            return -1;
-        }
+        if (!_t || !_vad || !_vdd || _vdd<.01) return;
 
         let humidity_uncompensated = ((_vad/_vdd) - (0.8 / _vdd)) / 0.0062;
         let temperature_compensation = 1.0546 - 0.00216 * _t;
@@ -181,9 +200,7 @@ class ds2438 {
         let _vad = this.vad(bridge, id);
         let _vdd = this.vdd(bridge, id);
 
-        if (!_t || !_vad || !_vdd || _vdd<.01) {
-            return -1;
-        }
+        if (!_t || !_vad || !_vdd || _vdd<.01) return;
 
         let humidity_uncompensated = ((_vad/_vdd) - 0.16) / 0.0062;
         let temperature_compensation = 1.0546 - 0.00216 * _t;
@@ -193,6 +210,8 @@ class ds2438 {
     // SFH-5711
     illuminance_5711(bridge, id) {
         let _vsense = this.vsense(bridge, id);
+        if (!_vsense) return;
+
         return 10^((_vsense/47)*1000);
     }
 
