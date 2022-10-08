@@ -392,7 +392,7 @@ class DS2482 {
         }
 
         if (rom[0] === 0 || rom.length !== ROM_SIZE) {
-            throw new Error('ROM invalid');
+            throw new Error(`${rom}: ROM invalid.`);
         }
 
         this._resetWire();
@@ -629,7 +629,7 @@ class DS2482 {
 
             let paths = this.#get_paths(worker) || [];
             for (let i = 0, l = paths.length; i < l; i++) {
-                p.push(`${id}/${paths[i]}`);
+                p.push(`${id.substring(0,2)}.${id.substring(2)}/${paths[i]}`);
             }
         }
         return p.sort();
@@ -646,13 +646,20 @@ class DS2482 {
         let pp = path.split("/");
         let id = pp.shift();
 
-        if (!id || id.length < 8) {
+        if (!id || id.length < 16) {
             throw new RangeError(`'${path}' is an invalid path.`)
         }
 
-        // trace(id + "\n");
-
         let family = id.substring(0, 2);
+
+        // accept 28.FFFFFFF...
+        // as well as 28FFFFFF...
+        if (id[2] === ".") {
+            id = family + id.substring(3);            
+        }
+
+        trace(id + "\n");
+
         let worker = this.#get_worker(family);
 
         let read_fn = worker?.paths?.[pp.join("/")]?.[0];
@@ -676,6 +683,13 @@ class DS2482 {
         }
 
         let family = id.substring(0, 2);
+
+        // accept 28.FFFFFFF...
+        // as well as 28FFFFFF...
+        if (id[2] === ".") {
+            id = family + id.substring(3);            
+        }
+
         let worker = this.#get_worker(family);
 
         let write_fn = worker?.paths?.[pp.join("/")]?.[1];
