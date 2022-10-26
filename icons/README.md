@@ -1,6 +1,6 @@
 # 1w.png
 
-1w.png is part of
+`1w.png` is part of
 `node-red-contrib-owfs`: Node-RED node for talking to 1-wire devices using owfs
 
 * @author   Nicholas Humfreyh <https://github.com/njh>
