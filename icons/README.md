@@ -5,6 +5,6 @@
 
 * @author   Nicholas Humfreyh <https://github.com/njh>
 * @author   @njh
-* @license  Apache-2.0
+* @license  [Apache-2.0](./LICENSE)
 * @github   https://github.com/njh/node-red-contrib-owfs
 
