@@ -14,12 +14,16 @@
     "fs-extra": "^10.1.0"
   },
   "node-red": {
+    "version": ">=2.0.0",
     "nodes": {
       "DS2482": "ds2482.js"
     }
   },
+  "engines": {
+    "node": ">=14.0.0"
+  },
   "keywords": [
-    "Node-RED",
+    "node-red",
     "MCU",
     "DS2482",
     "I2C",
