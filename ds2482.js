@@ -39,7 +39,7 @@ module.exports = function(RED) {
     }
         
     RED.nodes.registerType("mcu*ds2482",mcuDS2482Node);
-    if (registerMCUModeType)
+    if (typeof registerMCUModeType !== undefined)
         registerMCUModeType("ds2482", "mcu*ds2482");
 
 
