@@ -4,9 +4,6 @@
     License: MIT
 */
 
-import {Buffer} from "buffer";
-import {CRC16} from "crc";
-
 class ds2408 {
 
     paths = {
@@ -35,6 +32,8 @@ class ds2408 {
         RESET_LATCHES: 0xC3,
     })
 
+    cmds = this.#cmds
+
     #channels = Object.freeze({
         CH0: (1 << 0),
         CH1: (1 << 1),
@@ -46,6 +45,8 @@ class ds2408 {
         CH7: (1 << 7),
     })
 
+    channels = this.#channels
+
     #bits = Object.freeze({
         PLS: (1 << 0),
         CT: (1 << 1),
@@ -53,6 +54,8 @@ class ds2408 {
         PORL: (1 << 3),
         VCCP: (1 << 7)
     })
+
+    bits = this.#bits
 
     #registers = Object.freeze({
         LOGIC_STATE: 0x88,
@@ -63,6 +66,8 @@ class ds2408 {
         CONTROL_STATUS: 0x8D
     })
 
+    registers = this.#registers
+
     #register_read(bridge, id, target) {
 
         if (target) {
@@ -70,10 +75,8 @@ class ds2408 {
             if (target > 0x8d) { return 0xFF; }    
         }
         
-        let cmd = Buffer.from([this.#cmds.READ_PIO, 0x88, 0]);
-
-        // { poly: 0x8005, init: 0x0000, res: 0x44C2, refIn: true,  refOut: true,  xorOut: 0xFFFF, name: "CRC-16/MAXIM" },
-        let crc16 = new CRC16(0x8005, 0, true, true, 0xFFFF);
+        // let cmd = Buffer.from([this.#cmds.READ_PIO, 0x88, 0]);
+        const cmd = Uint8Array.of(this.#cmds.READ_PIO, 0x88, 0);
 
         let checksum;
         let crc;
@@ -81,29 +84,31 @@ class ds2408 {
         let count = 5
 
         do {
-            // initialisation
-            crc16.reset();
-            crc16.checksum(cmd.buffer);
 
             bridge.matchROM(id);
-            trace("writing: " + cmd.toString("hex") + "\n");
-            // debugger;
             bridge.writeData(cmd);
             regs = bridge.readData(10);  // registers until 0x8f, then crc16
-            trace("#register_read: " + JSON.stringify(regs) + "\n");
 
-            checksum = regs.readUInt16LE(8); // crc16 in 2 last bytes
+            checksum = bridge.readUInt16LE(regs, 8);
 
-            let cbuf = Buffer.from(regs.buffer, 0, 8);
-            crc = crc16.checksum(cbuf);
+            // necessary as of
+            // https://github.com/Moddable-OpenSource/moddable/issues/956
 
-            trace("crc: " + crc.toString(16) + " | checksum: " + checksum.toString(16) + "\n");
+            // shrink to to remove the two last bytes (holding the checksum)
+            let cb = [...cmd, ...regs]
+            cb.length = 11  // cmd:3 + regs:10 - crc:2
+
+            const crc_buffer = new Uint8Array(cb);
+            crc = bridge.crc16(crc_buffer)
+
             count--;
 
-        } while (true == false) // (checksum != crc && count > -1)
+        } while (crc !== checksum && count > -1)
 
         if (target) {
-            return regs.readUInt8(target - 0x88);   
+            target = target - 0x88;
+            if (target > 0 && regs.length >= target) 
+                return regs[target];   
         }
 
         return regs;
@@ -121,11 +126,13 @@ class ds2408 {
     }
 
     #bit_get(value, bit) {
-        return ((value >> bit) % 2);
+        // return ((value >> bit) % 2);
+        return (value & bit) > 0 ? 1 : 0;
     }
 
     #bit_set(value, bit, status) {
-        return status ? (value | 1<<bit) : (value & ~(1<<bit));
+        // return status ? (value | 1<<bit) : (value & ~(1<<bit));
+        return status ? (value | bit) : (value & ~bit);
     }
 
     #register_bit_get(bridge, id, register, bit, invert) {
@@ -179,76 +186,230 @@ class ds2408 {
         let count = 5;
         do {
             bridge.writeData(this.#cmds.RESET_LATCHES);
-            let res = bridge.readData(1);
+            let res = bridge.readData(2);
             count--;
-        } while (res != 0xAA & count > -1);
+        } while (res[0] != 0xAA && count > -1);
     }
 
-    #pio_set_channel(bridge, id, channel, data) {
+    #pio_channel_set(bridge, id, channel, data) {
 
         // to be sure!
-        this.disable_test_mode();
+        // this.disable_test_mode(bridge, id);
 
-        let reg;
+        let reg = data;
 
         if (channel) {
             reg = this.#register_read(bridge, id, this.#registers.OUTPUT_LATCH_STATE);
+            // trace(`@read: ${reg}\n`);
             reg = this.#bit_set(reg, channel, (data ? 1 : 0));
-        } else {
-            reg = data;
         }
 
-        // reg = (reg ^ 0xFF) & 0xFF ; // invert bits & limit to byte
-        reg = reg & 0xFF;
+        // resumeROM didn't work (here)
+        bridge.matchROM(id);
+        bridge.writeData([this.#cmds.CHANNEL_ACCESS_WRITE, (reg & 0xFF), (~reg & 0xFF)]);
 
-        bridge.writeData([this.#cmds.CHANNEL_ACCESS_WRITE, reg, (~reg & 0xFF)]);
-        let res = bridge.readData(1);
+        // >= 2 (!!) bytes have to be read here!
+        // if not, there might be the issue that the relay doesnt switch
+        // second byte is always ==0 (here!)
+        let res = bridge.readData(2);
 
-        return (res == 0xAA);
+        return res.length > 0 ? 0xAA === res[0] : false
     }
 
     // 0x88, inverted
-    state_get(bridge, id) { return this.#register_read(bridge, id, this.#registers.LOGIC_STATE); }
-    state_get0(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH0); }
-    state_get1(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH1); }
-    state_get2(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH2); }
-    state_get3(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH3); }
-    state_get4(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH4); }
-    state_get5(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH5); }
-    state_get6(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH6); }
-    state_get7(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.LOGIC_STATE, this.#channels.CH7); }
+    state_get(bridge, id) { return register_read(this, bridge, id, this.registers.LOGIC_STATE); }
+    state_get0(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH0); }
+    state_get1(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH1); }
+    state_get2(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH2); }
+    state_get3(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH3); }
+    state_get4(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH4); }
+    state_get5(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH5); }
+    state_get6(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH6); }
+    state_get7(bridge, id) { return register_bit_get(this, bridge, id, this.registers.LOGIC_STATE, this.channels.CH7); }
 
     // 0x89, inverted
-    pio_get(bridge, id) { return this.#register_read(bridge, id, this.#registers.OUTPUT_LATCH_STATE); }
-    pio_get0(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH0); }
-    pio_get1(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH1); }
-    pio_get2(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH2); }
-    pio_get3(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH3); }
-    pio_get4(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH4); }
-    pio_get5(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH5); }
-    pio_get6(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH6); }
-    pio_get7(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.OUTPUT_LATCH_STATE, this.#channels.CH7); }
+    pio_get(bridge, id) { return register_read(this, bridge, id, this.registers.OUTPUT_LATCH_STATE); }
+    pio_get0(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH0); }
+    pio_get1(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH1); }
+    pio_get2(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH2); }
+    pio_get3(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH3); }
+    pio_get4(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH4); }
+    pio_get5(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH5); }
+    pio_get6(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH6); }
+    pio_get7(bridge, id) { return register_bit_get(this, bridge, id, this.registers.OUTPUT_LATCH_STATE, this.channels.CH7); }
 
-    pio_set(bridge, id, data) { return this.#pio_set_channel(bridge, id, data); }
-    pio_set0(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH0, data); }
-    pio_set1(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH1, data); }
-    pio_set2(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH2, data); }
-    pio_set3(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH3, data); }
-    pio_set4(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH4, data); }
-    pio_set5(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH5, data); }
-    pio_set6(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH6, data); }
-    pio_set7(bridge, id, data) { return this.#pio_set_channel(bridge, id, this.#channels.CH7, data); }
+    pio_set(bridge, id, data) { return pio_channel_set(this, bridge, id, 0, data); }
+    pio_set0(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH0, data); }
+    pio_set1(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH1, data); }
+    pio_set2(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH2, data); }
+    pio_set3(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH3, data); }
+    pio_set4(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH4, data); }
+    pio_set5(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH5, data); }
+    pio_set6(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH6, data); }
+    pio_set7(bridge, id, data) { return pio_channel_set(this, bridge, id, this.channels.CH7, data); }
 
     // 0x8a
-    latch_get(bridge, id) { return this.#register_read(bridge, id, this.#registers.ACTIVITY_LATCH_STATE); }
-    latch_get0(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH0); }
-    latch_get1(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH1); }
-    latch_get2(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH2); }
-    latch_get3(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH3); }
-    latch_get4(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH4); }
-    latch_get5(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH5); }
-    latch_get6(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH6); }
-    latch_get7(bridge, id) { return this.#register_bit_get(bridge, id, this.#registers.ACTIVITY_LATCH_STATE, this.#channels.CH7); }
+    latch_get(bridge, id) { return register_read(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE); }
+    latch_get0(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH0); }
+    latch_get1(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH1); }
+    latch_get2(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH2); }
+    latch_get3(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH3); }
+    latch_get4(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH4); }
+    latch_get5(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH5); }
+    latch_get6(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH6); }
+    latch_get7(bridge, id) { return register_bit_get(this, bridge, id, this.registers.ACTIVITY_LATCH_STATE, this.channels.CH7); }
+}
+
+
+async function register_read(self, bridge, id, target) {
+
+    if (target) {
+        if (target < 0x88) { return 0; }
+        if (target > 0x8d) { return 0xFF; }    
+    }
+    
+    const cmd = Uint8Array.of(self.cmds.READ_PIO, 0x88, 0);
+
+    let checksum;
+    let crc;
+    let regs;
+    let count = 5
+
+    do {
+
+        await bridge.matchROM(id);
+        await bridge.writeData(cmd);
+        regs = await bridge.readData(10);  // registers until 0x8f, then crc16
+
+        checksum = bridge.readUInt16LE(regs, 8);
+
+        // necessary as of
+        // https://github.com/Moddable-OpenSource/moddable/issues/956
+
+        // shrink cb to remove the two last bytes (holding the checksum)
+        let cb = [...cmd, ...regs]
+        cb.length = 11  // cmd:3 + regs:10 - crc:2
+
+        const crc_buffer = new Uint8Array(cb);
+        crc = bridge.crc16(crc_buffer)
+
+        count--;
+
+    } while (crc !== checksum && count > -1)
+
+    if (target) {
+        target = target - 0x88;
+        if (target > 0 && regs.length >= target) 
+            return regs[target];   
+    }
+
+    return regs;
+}
+
+async function register_write(self, bridge, id, data, target, invert) {
+    if (!data) return;
+    if (target < 0x8B || target > 0x8D) return;
+
+    data = invert ? (data ^ 0xFF) : data;
+
+    await bridge.matchROM(id);
+    await bridge.writeData([self.cmds.WRITE_REGISTER, target, 0, (data & 0xFF)]);
+    await bridge._resetWire();
+}
+
+function bit_get(value, bit) {
+    // return ((value >> bit) % 2);
+    return (value & bit) > 0 ? 1 : 0;
+}
+
+function bit_set(value, bit, status) {
+    // return status ? (value | 1<<bit) : (value & ~(1<<bit));
+    return status ? (value | bit) : (value & ~bit);
+}
+
+async function register_bit_get(self, bridge, id, register, bit, invert) {
+    let reg = await register_read(self, bridge, id, register);
+    reg = invert ? (reg ^ 0xFF) : reg
+    return bit_get(reg, bit);
+}
+
+async function register_bit_set(self, bridge, id, register, bit, state, invert) {
+    invert = invert ? 1 : 0;
+    state = state ? 1-invert : 0+invert;
+    let reg = await register_read(self, bridge, id, register);
+    reg = bit_set(reg, bit, state);
+
+    do {
+        await register_write(self, bridge, id, register);
+        let check = await register_read(self, bridge, id, register);
+    } while (check != reg)
+}
+
+async function power_get(self, bridge, id) {
+    return register_bit_get(self, bridge, id, self.registers.CONTROL_STATUS, self.bits.VCCP);
+}
+
+async function por_get(self, bridge, id) {
+    return register_bit_get(self, bridge, id, self.registers.CONTROL_STATUS, self.bits.PORL);
+}
+
+async function por_set(self, bridge, id, data) {
+    data = data ? 1 : 0;
+    register_bit_set(self, bridge, id, self.registers.CONTROL_STATUS, self.bits.PORL, state);
+}
+
+async function strobe_get(self, bridge, id) {
+    return register_bit_get(self, bridge, id, self.registers.CONTROL_STATUS, self.bits.ROS);
+}
+
+async function strobe_set(self, bridge, id, data) {
+    return register_bit_set(self, bridge, id, self.registers.CONTROL_STATUS)
+}
+
+async function disable_test_mode(self, bridge, id) {
+    // magic command...
+    await bridge.matchROM(id);
+    await bridge.writeData([0x96, id, 0x3C]);
+    await bridge._resetWire();
+}
+
+async function latch_reset(self, bridge, id) {
+    await bridge.matchROM(id);
+    let count = 5;
+    do {
+        await bridge.writeData(self.cmds.RESET_LATCHES);
+        let res = await bridge.readData(2);
+        count--;
+    } while (res[0] != 0xAA && count > -1);
+}
+
+async function pio_channel_set(self, bridge, id, channel, data) {
+
+    // to be sure!
+    // this.disable_test_mode(bridge, id);
+
+    let reg = data;
+
+    if (channel) {
+        reg = await register_read(self, bridge, id, self.registers.OUTPUT_LATCH_STATE);
+        // trace(`@read: ${reg}\n`);
+        reg = bit_set(reg, channel, (data ? 1 : 0));
+    }
+
+    trace("here" + "\n");
+
+    // resumeROM didn't work (here)
+    await bridge.matchROM(id);
+    await bridge.writeData([self.cmds.CHANNEL_ACCESS_WRITE, (reg & 0xFF), (~reg & 0xFF)]);
+
+    // >= 2 (!!) bytes have to be read here!
+    // if not, there might be the issue that the relay doesnt switch
+    // second byte is always ==0 (here!)
+    let res = await bridge.readData(2);
+
+    trace(res + "\n");
+
+    return res.length > 0 ? 0xAA === res[0] : false
 }
 
 export { ds2408 as default}

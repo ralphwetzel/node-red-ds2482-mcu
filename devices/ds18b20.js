@@ -21,7 +21,7 @@ class ds18b20 {
         "parasite/temperature12": [this.p_temperature12]
     }
 
-    #cmds = Object.freeze({
+    cmds = Object.freeze({
         WRITE_SCRATCHPAD: 0x4E,
         READ_SCRATCHPAD: 0xBE,
         COPY_SCRATCHPAD: 0x48,
@@ -30,7 +30,7 @@ class ds18b20 {
         POWER_SUPPLY: 0xB4
     })
 
-    #resolution = Object.freeze({
+    resolution = Object.freeze({
             // config, delay, mask, scale
         "9":  [0x1F, 110, 0xF8, 16.],
         "10": [0x3F, 200, 0xFC, 16.],
@@ -38,144 +38,144 @@ class ds18b20 {
         "12": [0x7F,1000, 0xFF, 16.]
     })
 
-    // matchROM(id) {
-    //     if (!id) { return; }
-    //     bridge.matchROM(id);
-    // }
-
-    #temp_conv(bridge, id, precision, SPU) {
-
-        precision = precision ?? 12;
-        SPU = SPU ?? false;
-
-        // confirm and set precision
-        let sp = this.#read_sp(bridge, id);
-        if (sp[4] != this.#resolution[precision][0]) {
-            this.#write_sp(bridge, id, sp[2], sp[3], this.#resolution[precision][0]);
-        }
-
-        if (SPU === true) {
-
-            bridge.matchROM(id);
-            bridge.strongPullup();
-            bridge.writeData([this.#cmds.CONVERT_TEMP]);
-            Timer.delay(this.#resolution[precision][1]);
-
-        } else {
-
-            bridge.matchROM(id);
-            bridge.writeData([this.#cmds.CONVERT_TEMP]);
-
-            let stop = false;
-            let conv_timer = Timer.set(() => {
-                stop = true;
-            }, this.#resolution[precision][1]);
-
-            let rb;
-            do {
-                if (rb) {
-                    Timer.delay(30);
-                }
-                rb = bridge.readData(1);
-
-                trace(`${rb[0]} / ${stop}\n`);
-
-            } while ((rb[0] == 0) && (stop == false))
-
-            Timer.clear(conv_timer);
-        }
-
-        return this.#temp_fetch(bridge, id, precision);
-    }
-
-
-    #read_sp(bridge, id, length) {
-        
-        length = length ?? 9;
-
-        let self = this;
-        let count = 0;
-        let crc;
-        let sp;
-
-        function r(b, i, l) {
-            b.matchROM(i)
-            b.writeData([self.#cmds.READ_SCRATCHPAD]);
-            return b.readData(l);
-        }
-
-        // no crc check!
-        if (length < 9) { 
-            sp = r(bridge, id, length);
-            bridge._resetWire();
-            return sp;
-        }
-
-        do {
-            sp = r(bridge, id, length);
-            count++;
-            crc = bridge.checkCRC(sp)
-        } while (true == false) // ((crc === false) && count < 5)
-
-        return sp;
-    }
-
-    #write_sp(bridge, id, Th, Tl, CB) {
-
-        Th = Th ?? 0;
-        Tl = Tl ?? 0;
-        CB = CB ?? 0;
-
-        bridge.matchROM(id);
-        bridge.writeData([this.#cmds.WRITE_SCRATCHPAD]);
-
-        // All 3 bytes MUST be written always!
-        bridge.writeData([Th, Tl, CB]);
-
-    }
-
-    #temp_fetch(bridge, id, precision) {
-        precision = precision ?? 12;
-
-        let sp = this.#read_sp(bridge, id, 2);
-        sp[0] = sp[0] & this.#resolution[precision][2];
-        let t = sp.readInt16LE(0);
-        return t / this.#resolution[precision][3];
-    }
-
-
     temperature9(bridge, id) {
-        return this.#temp_conv(bridge, id, 9); 
+        return temp_conv(this, bridge, id, 9); 
     }
 
     temperature10(bridge, id) {
-        return this.#temp_conv(bridge, id, 10); 
+        return temp_conv(this, bridge, id, 10); 
     }
 
     temperature11(bridge, id) {
-        return this.#temp_conv(bridge, id,  11); 
+        return temp_conv(this, bridge, id,  11); 
     }
 
     temperature12(bridge, id) {
-        return this.#temp_conv(bridge, id, 12); 
+        return temp_conv(this, bridge, id, 12); 
     }
 
     p_temperature9(bridge, id) {
-        return this.#temp_conv(bridge, id, 9, true); 
+        return temp_conv(this, bridge, id, 9, true); 
     }
 
     p_temperature10(bridge, id) {
-        return this.#temp_conv(bridge, id, 10, true);
+        return temp_conv(this, bridge, id, 10, true);
     }
 
     p_temperature11(bridge, id) {
-        return this.#temp_conv(bridge, id, 11, true);
+        return temp_conv(this, bridge, id, 11, true);
     }
 
     p_temperature12(bridge, id) {
-        return this.#temp_conv(bridge, id, 12, true);
+        return temp_conv(this, bridge, id, 12, true);
     }
 
 }
+
+
+async function temp_conv(self, bridge, id, precision, SPU) {
+
+    precision = precision ?? 12;
+    SPU = SPU ?? false;
+
+    // confirm and set precision
+    let sp = await read_sp(self, bridge, id);
+    if (sp[4] != self.resolution[precision][0]) {
+        await write_sp(self, bridge, id, sp[2], sp[3], self.resolution[precision][0]);
+    }
+
+    if (SPU === true) {
+
+        await bridge.matchROM(id);
+        await bridge.strongPullup();
+        await bridge.writeData([self.cmds.CONVERT_TEMP]);
+        await bridge.timeout(self.resolution[precision][1]);
+
+    } else {
+
+        await bridge.matchROM(id);
+        await bridge.writeData([self.cmds.CONVERT_TEMP]);
+
+        let stop = false;
+        let conv_timer = Timer.set(() => {
+            stop = true;
+        }, self.resolution[precision][1]);
+
+        let rb;
+        do {
+            if (rb) {
+                await bridge.timeout(30);
+            }
+            rb = await bridge.readData(1);
+
+        } while ((rb[0] == 0) && (stop == false))
+
+        Timer.clear(conv_timer);
+    }
+
+    return temp_fetch(self, bridge, id, precision);
+}
+
+async function read_sp(self, bridge, id, length) {
+        
+    length = length ?? 9;
+
+    async function r(b, i, l) {
+        await b.matchROM(i);
+        await b.writeData([self.cmds.READ_SCRATCHPAD]);
+        return await b.readData(l);
+    }
+
+    // no crc check!
+    if (length < 9) { 
+        let sp = await r(bridge, id, length);
+        await bridge._resetWire();
+        return sp;
+    }
+
+    let count = 0;
+    let crc;
+    let sp;
+
+    do {
+
+        sp = await r(bridge, id, length);
+        count++;
+
+        if (sp instanceof Uint8Array) {
+            crc = bridge.crc8(sp)
+        } else {
+            crc = -1;
+        }
+
+    } while ((crc !== 0) && count < 5)
+
+    return sp;
+}
+
+async function write_sp(self, bridge, id, Th, Tl, CB) {
+
+    Th = Th ?? 0;
+    Tl = Tl ?? 0;
+    CB = CB ?? 0;
+
+    await bridge.matchROM(id);
+    await bridge.writeData([self.cmds.WRITE_SCRATCHPAD]);
+
+    // All 3 bytes MUST be written always!
+    await bridge.writeData([Th, Tl, CB]);
+
+}
+
+async function temp_fetch(self, bridge, id, precision) {
+    precision = precision ?? 12;
+
+    let sp = await read_sp(self, bridge, id, 2);
+    sp[0] = sp[0] & self.resolution[precision][2];
+    let t = bridge.readInt16LE(sp, 0);
+    return t / self.resolution[precision][3];
+}
+
+
 
 export { ds18b20 as default}

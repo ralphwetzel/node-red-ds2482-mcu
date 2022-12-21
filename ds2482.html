@@ -76,10 +76,26 @@
 </script>
 
 <script type="text/x-red" data-help-name="ds2482">
-    <p>A node for talking to <a href="http://www.maximintegrated.com/en/products/comms/one-wire.html" target="_new">1-wire</a> devices using a DS2482 I2C 1-Wire bridge.</p>
-    <p>One or more device paths can be selected in the node edit dialog. Upon receiving a message on the input the node, it will request each of the values in turn from the bridge and places the reading in <b>msg.payload</b>.</p>
-    <p>Alternatively a device path can be specified in the <b>msg.topic</b> field, for example <code>28.0080BE21AA00/temperature</code>. This will override any paths selected in the edit dialog.</p>
-    <p>To trigger reading sensors periodically, use an Inject node to send messages every X seconds.</p>
+    <p>A node to talk to <a href="http://www.maximintegrated.com/en/products/comms/one-wire.html" target="_new">1-wire</a> devices using a <b>DS2482 I2C 1-Wire bridge</b>.</p>
+    <p> One or more device paths may be selected in the node edit dialog along with the operational mode, read or write.
+    <p> In <b>read</b> mode, upon receiving a message on the input, the node will request each of the values in turn from the bridge and place the reading in <code>msg.payload</code>.</p>
+    <p> To <b>write</b> data to a 1-wire device, select the device path in the node edit dialog and provide the data to be written as <code>msg.payload</code>. If you selected more than one path, you can write different values to each of them by sending those as an array in <code>msg.payload</code>.
+    <p><b>Additionally</b> some or all parameters may be defined by the incoming <code>msg</code> object:<p>
+    <ul>
+        <li>Use <code>msg.mode</code> to set the mode of operation: <code>read</code> or <code>write</code></li>
+        <li>Define the path (single <code>&ltstring&gt</code>) or paths (<code>&ltarray of strings&gt</code>) to be operated on as <code>msg.topic</code>, for example <code>"28.0080BE21AA00/temperature"</code>.</li>
+        <li>The type of <code>msg.topic</code> (single path or array of paths) defines the type of the result received at the output (single value or array of values). If you send <code>msg.topic</code> as an object of one or more <code>{key: path}</code> elements,
+             the result will be an object holding <code>{key: value}</code> elements.</li>
+        <li>To <b>write</b> data, provide it as <code>msg.payload</code>:
+            <ul>
+                <li>A single value will be written to all defined paths.</li>
+                <li>If <code>msg.payload</code> holds an array, and you defined a single path in <code>msg.topic</code>, those values will be written in sequence to the single path.</li>
+                <li>If <code>msg.payload</code> holds an array, and you defined an array of paths or an object in <code>msg.topic</code>, each data element will be written to the corresponding path element, defined by the indexed position in the dedicated array or enumerated object.</li>
+                <li>If the number of data elements defined in <code>msg.payload</code> is shorter than the number of paths defined in <code>msg.topic</code>, paths without corresponding data definition will be skipped.</li>
+            </ul>
+        <li>Any value provided in the incoming <code>msg</code> object will override the definition done in the edit dialog.
+    </ul>
+    <p>To trigger reading or writing to 1-wire devices periodically, use an Inject node to send messages every X seconds.</p>
 </script>
 
 <script type="text/javascript">
@@ -197,6 +213,9 @@
             }
 
             RED.comms.subscribe("ds2482/pathupdate", function (topic, msg) {
+
+                console.log("New Paths arrived!");
+
                 let id = msg?.id;
                 if (id == node.controller) {
                     let currentPaths = $('#node-input-paths-container input:checked').map( function() {

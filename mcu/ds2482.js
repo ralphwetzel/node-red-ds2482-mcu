@@ -18,142 +18,112 @@ import Timer from "timer";
 import config_from_manifest from "mc/config";
 
 import { cmds } from "commands";
-import { Buffer } from "buffer";
-// import { trace } from "console";
-//import { trace } from "console";
-
-// import { trace } from "console";
-
-// const utils = require('./utils');
+import { CRC8, CRC16 } from "crc";
+import Hex from "hex";
 
 const ROM_SIZE = 8;
 
-const _utils = {
-    checkCRC: function (buffer, length) {
-
-        if (!(buffer instanceof Buffer)) {
-            // eslint-disable-next-line no-param-reassign
-            buffer = Buffer.from(Array.isArray(buffer) ? buffer : [buffer]);
-        }
-
-        length = length ?? buffer.length;
-
-        let crc = 0;
-
-        for (let i = 0; i < length; i += 1) {
-            crc ^= buffer.readUInt8(i);
-
-            for (let j = 0; j < 8; j += 1) {
-                if (crc & 0x01) {
-                    crc = (crc >> 1) ^ 0x8C;
-                } else {
-                    crc >>= 1;
-                }
-            }
-        }
-
-        return (crc === 0);
-    },
-
-    // delay: function (duration) {
-    //     return new Promise(resolve => {
-    //         setTimeout(() => {
-    //             trace(duration + "\n");
-    //             resolve();
-    //         }, duration)
-    //     })
-    // }
-}
-
-const utils = Object.freeze(_utils);
-
-// const owFamilyCode = {
-//     "26": "ds2438"
-// }
-
-// The generic (= not implemented) 1-wire device
 class owGeneric {
     paths = { "not_implemented": [] }
 }
 
-// class owDevice {
+function i2c_write_async(i2c, bytesArray) {
+    return new Promise((resolve, reject) => {
+        i2c.write(Uint8Array.from(bytesArray).buffer, true, (err) => {
+            if (err) {
+                reject(Error(`I2C Write failed: ${err.toString()}`));
+                return;
+            }
+            resolve();
+        })
+    })
+}
 
-//     #id;
-//     #paths = {};
+function i2c_write_sync(i2c, bytesArray) {
+    return new Promise((resolve, reject) => {
+        try {
+            i2c.write(Uint8Array.from(bytesArray).buffer, true);
+        } catch (err) {
+            reject(Error(`I2C Write failed: ${err.toString()}`));
+            return;
+        }
+        resolve();
+    });
+}
 
-//     add_path(name, read, write) {
-//         if (name in this.#paths) {
-//             throw new RangeError(`Path labeled "${name}" already exists.`)
-//         }
-//         this.#paths[name] = [read, write];
-//     }
+function i2c_read_async(i2c) {
+    return new Promise((resolve, reject) => {
+        let buffer = new Uint8Array(1);
+        i2c.read(buffer, (err, count) => {
+            if (err) {
+                reject(Error(`I2C Read failed: ${err.toString()}`));
+                return;
+            }
+            resolve(count > 0 ? (buffer[0] & 0xFF) : undefined);
+        });
+    });
+}
 
-//     constructor(id) {
-//         this.#id = id;
-//     }
-
-//     get id() {
-//         return this.#id;
-//     }
-
-//     read(bridge, id, path) {
-//         if (path in this.#paths) {
-//             return this.#paths[path][0](bridge, id);
-//         }
-//     }
-
-//     write(bridge, id, path, data) {
-//         if (path in this.#paths) {
-//             this.#paths[path][1](bridge, id, data);
-//             return true;
-//         }
-//         return;
-//     }
-
-//     get paths() {
-//         return Object.keys(this.#paths).sort();
-//     }
-// }
-
-
-// class ds2438 extends owDevice {
-
-//     static {
-//         super.#add("temperature", function(bridge, id, path){}, function(bridge, id, path, data){})
-
-//     }
-
-
-
-// }
-
-
-
+function i2c_read_sync(i2c) {
+    return new Promise((resolve, reject) => {
+        try {
+            let buffer = new Uint8Array(1);
+            let count = i2c.read(buffer, true);
+            resolve(count > 0 ? (buffer[0] & 0xFF) : undefined);
+            return;
+        } catch (err) {
+            reject(Error(`I2C Read failed: ${err.toString()}`));
+        }
+    });
+}
 
 class DS2482 {
 
-    /* the table to translate family codes to module names shall be defined in the
-     * manifest.json:
-     *  {
-     *      config: {
-     *          ds2482: {
-     *              <family_code>: <module_name>
-     *          }
-     *      }
-     *  }
-     */
     #modules4devices = config_from_manifest?.ds2482?.devices;
     #modules = {};
 
     #devices = [];
     #workers = {};
 
-    constructor(i2c) {
-        // eslint-disable-next-line no-param-reassign
-        // options = options || {};
+    // https://javascript.info/currying-partials
+    #curry = function (f) {
+        return function(a) {
+            return function(b) {
+            return f(a, b);
+            };
+        };
+    }
 
+    constructor(i2c, async) {
         this.i2c = i2c;
         this.channel = null;
+
+        // https://javascript.info/currying-partials
+        let curry = function (f) {
+            return function(a) {
+                return function(b) {
+                return f(a, b);
+                };
+            };
+        }
+
+        if (async) {
+
+            let cra = curry(i2c_read_async);
+            this._i2cRead = cra(this.i2c);
+
+            let cwa = curry(i2c_write_async);
+            this._i2cWrite = cwa(this.i2c);
+
+        } else {
+
+            let crs = curry(i2c_read_sync);
+            this._i2cRead = crs(this.i2c);
+
+            let cws = curry(i2c_write_sync);
+            this._i2cWrite = cws(this.i2c);
+
+        }
     }
 
     /*
@@ -168,72 +138,62 @@ class DS2482 {
         this.lastFound = null;
         this.lastConflict = 0;
 
-        this._resetBridge();
-        return this._resetWire();
+        return this._resetBridge()
+            .then(() => this._resetWire());
     }
 
-    configureBridge(options, confirm) {
-        // let config = 0;
+    configureBridge(options) {
+        let config = 0;
 
-        options ??= {};
+        // trace("@configureBridge\n");
 
-        this._wait(true);
-        this._i2cWrite(cmds.SET_READ_POINTER, [cmds.REGISTERS.CONFIG]);
-        let config = this._i2cRead() & 0x0F;
-
-        if (options.activePullup) {
-            config = (config & ~cmds.CONFIG.ACTIVE) | ((options.activePullup ? 1 : 0) * cmds.CONFIG.ACTIVE)
-        }
-        if (options.strongPullup) {
-            config = (config & ~cmds.CONFIG.STRONG) | ((options.strongPullup ? 1 : 0) * cmds.CONFIG.STRONG)
-        }
-        if (options.overdrive) {
-            config = (config & ~cmds.CONFIG.OVERDRIVE) | ((options.overdrive ? 1 : 0) * cmds.CONFIG.OVERDRIVE)
+        if (options) {
+            if (options.activePullup) config |= cmds.CONFIG.ACTIVE;
+            if (options.strongPullup) config |= cmds.CONFIG.STRONG;
+            if (options.overdrive) config |= cmds.CONFIG.OVERDRIVE;
         }
 
-        this._i2cWrite(cmds.WRITE_CONFIG, [((~config & 0x0F) << 4) | config]);
+        return this._wait(true)
+            .then(() => this._i2cWrite([cmds.WRITE_CONFIG, ((~config & 0x0F) << 4) | config]))
+            .then(() => this._readBridge())
+            .then(resp => {
+                if (config !== resp) {
+                    throw Error('Failed to configure bridge');
+                }
+                // trace("@configureBridge Done\n");
 
-        let resp;
-        if (confirm) {
-            resp = this._readBridge();
-            if (config !== resp) {
-                throw new Error('Failed to configure bridge');
-            }
-        }
-
-        return resp;
-    }
-
-    strongPullup() {
-        this.configureBridge({strongPullup: true});
+                return resp;
+            });
     }
 
     selectChannel(num) {
-
         const ch = cmds.SELECTION_CODES[num || 0];
+
         if (!ch) {
-            throw new Error('Invalid channel');
+            return Promise.reject(Error('Invalid channel'));
         }
 
         if (this.channel === num) {
-            return ch.read;
+            return Promise.resolve(ch.read);
         }
 
-        this._wait(true);
-        this.writeData(cmds.CHANNEL_SELECT, [ch.write]);
-        let resp = this._readBridge();
+        return this._wait(true)
+            .then(() => this.writeData([cmds.CHANNEL_SELECT, ch.write]))
+            .then(() => this._readBridge())
+            .then(resp => {
+                if (ch.read !== resp) {
+                    throw Error('Failed to select channel');
+                }
 
-        if (ch.read !== resp) {
-            throw new Error('Failed to select channel');
-        }
+                this.channel = num;
 
-        this.channel = num;
-        return resp;
+                return resp;
+            });
     }
 
     sendCommand(cmd, rom) {
-        rom ? this.matchROM(rom) : this.skipROM();
-        this.writeData(cmd);
+        return (rom ? this.matchROM(rom) : this.skipROM())
+            .then(() => this.writeData([cmd]));
     }
 
     search() {
@@ -242,19 +202,27 @@ class DS2482 {
 
         const found = [];
 
-        const searchNext = () => {
-            let resp = this.searchROM();
-            found.push(resp);
+        const searchNext = () => (
+            this.searchROM()
+            .then(resp => {
+                trace("found: " + resp + "\n");
 
-            if (this.lastConflict) {
-                return searchNext();
-            }
+                found.push(resp);
+                // trace(`LastConflict: ${this.lastConflict}\n`);
 
-            this.lastFound = null;
-            this.lastConflict = 0;
+                if (this.lastConflict) {
+                    return searchNext();
+                }
 
-            return found;
-        };
+                this.lastFound = null;
+                this.lastConflict = 0;
+
+                return found;
+            })
+            .catch((err) => {
+                // throw err;
+            })
+        );
 
         return searchNext();
     }
@@ -265,27 +233,27 @@ class DS2482 {
             family = parseInt(family, 16);
         }
 
-        this.lastFound = Buffer.from([family, 0, 0, 0, 0, 0, 0, 0]);
+        this.lastFound = Uint8Array.of(family, 0, 0, 0, 0, 0, 0, 0);
         this.lastConflict = 64;
 
         const found = [];
 
-        const searchNext = () => {
-            let resp = this.searchROM()
+        const searchNext = () => (
+            this.searchROM().then(resp => {
+                if (this.lastFound[0] === family) {
+                    found.push(resp);
+                }
 
-            if (this.lastFound.readUInt8(0) === family) {
-                found.push(resp);
-            }
+                if (this.lastConflict > 7 && found.length) {
+                    return searchNext();
+                }
 
-            if (this.lastConflict > 7 && found.length) {
-                return searchNext();
-            }
+                this.lastFound = null;
+                this.lastConflict = 0;
 
-            this.lastFound = null;
-            this.lastConflict = 0;
-
-            return found;
-        };
+                return found;
+            })
+        );
 
         return searchNext();
     }
@@ -295,7 +263,7 @@ class DS2482 {
      */
 
     searchROM() {
-        const rom = Buffer.alloc(ROM_SIZE);
+        const rom = new Uint8Array(ROM_SIZE);
 
         let offset = 0;
         let mask = 0x01;
@@ -304,173 +272,182 @@ class DS2482 {
 
         const direction = () => {
             if (this.lastFound && bit < this.lastConflict) {
-                return this.lastFound.readUInt8(offset) & mask;
+                return this.lastFound[offset] & mask;
             }
 
             return bit === this.lastConflict ? 1 : 0;
         };
 
         const searchNextBit = () => {
-            let d = direction();
-            // trace("dir: " + d + "\n");
 
-            let resp = this.triplet(d);
+                let dirction = direction();
 
-            const sbr = (resp & cmds.STATUS.SINGLE_BIT);
-            const tsb = (resp & cmds.STATUS.TRIPLE_BIT);
-            const dir = (resp & cmds.STATUS.BRANCH_DIR);
+                return this.triplet(dirction)
+                .then(resp => {
+                    const sbr = (resp & cmds.STATUS.SINGLE_BIT);
+                    const tsb = (resp & cmds.STATUS.TRIPLE_BIT);
+                    const dir = (resp & cmds.STATUS.BRANCH_DIR);
+    
+                    if (sbr && tsb) {
+                        throw Error('Bad search result');
+                    }
+    
+                    if (!sbr && !tsb && !dir) {
+                        // trace("@last conflict: " + bit + "\n");
+                        lastConflict = bit;
+                    }
+    
+                    const part = rom[offset];
+    
+                    rom[offset] = dir ? part | mask : part & ~mask;
 
-            // trace(resp + "\n");
+                    // trace(`direction: ${dirction} | dir: ${dir} | bit: ${bit} | mask: ${mask} | offset: ${offset} | status: ${Hex.toString(rom)}\n`);
 
-            if (sbr && tsb) {
-                throw new Error('Bad search result');
+                    mask <<= 1;
+                    bit += 1;
+    
+                    if (mask > 128) {
+                        offset += 1;
+                        mask = 0x01;
+                    }
+    
+                    if (offset < rom.length) {
+                        return searchNextBit();
+                    }
+    
+                    if (rom[0] === 0) {
+                        throw Error('ROM invalid');
+                    }
+    
+                    if (this.crc8(rom) !== 0) {
+                        throw Error('CRC mismatch');
+                    }
+    
+                    this.lastFound = rom;
+                    this.lastConflict = lastConflict;
+    
+                    return Hex.toString(rom);
+                })
+                // .catch((err) => {
+                //     // throw err;
+                // })
+    
             }
-
-            if (!sbr && !tsb && !dir) {
-                lastConflict = bit;
-            }
-
-            const part = rom.readUInt8(offset);
-
-            rom.writeUInt8(dir ? part | mask : part & ~mask, offset);
-
-            mask <<= 1;
-            bit += 1;
-
-            if (mask > 128) {
-                offset += 1;
-                mask = 0x01;
-            }
-
-            if (offset < rom.length) {
-                return searchNextBit();
-            }
-
-            if (rom[0] === 0) {
-                throw new Error('ROM invalid');
-            }
-
-            if (!utils.checkCRC(rom)) {
-                throw new Error('CRC mismatch');
-            }
-
-            this.lastFound = rom;
-            this.lastConflict = lastConflict;
-
-            return rom.toString('hex');
-
-        };
-
-        this._resetWire();
-        this.writeData(cmds.ONE_WIRE_SEARCH_ROM);
-        return searchNextBit();
-
+    
+        return this._resetWire()
+            .then(() => this.writeData([cmds.ONE_WIRE_SEARCH_ROM]))
+            .then(() => searchNextBit());
     }
 
     readROM() {
-        this._resetWire();
-        this.writeData(cmds.ONE_WIRE_READ_ROM);
-        let rom = this.readData(ROM_SIZE);
+        return this._resetWire()
+            .then(() => this.writeData([cmds.ONE_WIRE_READ_ROM]))
+            .then(() => this.readData(ROM_SIZE))
+            .then(rom => {
+                if (rom[0] === 0) {
+                    throw Error('ROM invalid');
+                }
 
-        if (rom[0] === 0) {
-            throw new Error('ROM invalid');
-        }
+                if (this.crc8(rom) !== 0) {
+                    throw Error('CRC mismatch');
+                }
 
-        if (!utils.checkCRC(rom)) {
-            throw new Error('CRC mismatch');
-        }
-
-        return rom.toString('hex');
+                return Hex.toString(rom);
+            });
     }
 
     matchROM(rom) {
-        // trace(rom + "\n");
 
-        if (typeof rom === 'string') {
-            // eslint-disable-next-line no-param-reassign
-            rom = Buffer.from(rom, "hex");
+        if (typeof rom !== 'string') {
+            return Promise.reject(TypeError(`${rom}: Type not string.`));
+        }
+    
+        if (rom.length !== ROM_SIZE * 2) {
+            return Promise.reject(Error(`${rom}: ROM invalid.`));
+        }
+    
+        if (rom[0] === "0" && rom[1] === "0") {
+            return Promise.reject(Error(`${rom}: ROM invalid.`));
         }
 
-        if (rom[0] === 0 || rom.length !== ROM_SIZE) {
-            throw new Error(`${rom}: ROM invalid.`);
-        }
+        // writeData expects a dataArray (or a TypedArray)
+        rom = new Uint8Array(Hex.toBuffer(rom));
 
-        this._resetWire();
-        this.writeData(cmds.ONE_WIRE_MATCH_ROM);
-        return this.writeData(rom);
+        return this._resetWire()
+            .then(() => this.writeData([cmds.ONE_WIRE_MATCH_ROM]))
+            .then(() => this.writeData(rom));
     }
 
     skipROM() {
-        this._resetWire();
-        return this.writeData(cmds.ONE_WIRE_SKIP_ROM);
+        return this._resetWire()
+            .then(() => this.writeData([cmds.ONE_WIRE_SKIP_ROM]));
     }
 
-    strongPullup
     /*
      * Onewire read/write API
      */
 
-    writeData(data, length) {
-        if (!(data instanceof Buffer)) {
-            // eslint-disable-next-line no-param-reassign
-            data = Buffer.from(Array.isArray(data) ? data : [data]);
-        }
+    writeData(dataArray, length) {
 
-        length = length ?? data.byteLength;
-
+        length = length ?? dataArray.length;
         let offset = 0;
 
         const writeNextByte = () => {
-            this._i2cWrite(cmds.ONE_WIRE_WRITE_BYTE, data.slice(offset, offset + 1));
-            let resp = this._wait();
 
-            offset += 1;
-            if (offset < length) {
-                return writeNextByte();
-            }
+            // trace("writeData: " + dataArray[offset] + "\n")
 
-            return resp;
-        };
+            return this._i2cWrite([cmds.ONE_WIRE_WRITE_BYTE, dataArray[offset]])
+                .then(() => this._wait())
+                .then(resp => {
+                    offset += 1;
 
-        this._wait(true);
-        return writeNextByte();
+                    if (offset < length) {
+                        return writeNextByte();
+                    }
+
+                    return resp;
+                })
+            };
+
+        return this._wait(true).then(() => writeNextByte());
     }
 
     readData(size) {
-        const data = Buffer.alloc(size);
+        const data = new Uint8Array(size);
 
         let offset = 0;
+        const readByteCmd = [cmds.ONE_WIRE_READ_BYTE];
 
-        const readNextByte = () => {
-            this._i2cWrite(cmds.ONE_WIRE_READ_BYTE);
-            this._wait();
-            let resp = this._readBridge(cmds.REGISTERS.DATA);
+        const readNextByte = () => (
+            this._i2cWrite(readByteCmd)
+                .then(() => this._wait())
+                .then(() => this._readBridge(cmds.REGISTERS.DATA))
+                .then(resp => {
+                    data[offset] = resp;
+                    offset += 1;
 
-            data.writeUInt8(resp, offset);
-            offset += 1;
-            if (offset < data.length) {
-                return readNextByte();
-            }
+                    if (offset < size) {
+                        return readNextByte();
+                    }
 
-            return data;
-        }
+                    return data;
+                })
+        );
 
-        this._wait(true);
-        return readNextByte();
+        return this._wait(true).then(() => readNextByte());
     }
 
     bit(setHigh) {
-        this._wait(true);
-        this._i2cWrite(cmds.ONE_WIRE_SINGLE_BIT, [setHigh ? 0x80 : 0]);
-        let resp = this._wait();
-        return (resp & cmds.STATUS.SINGLE_BIT ? 1 : 0);
+        return this._wait(true)
+            .then(() => this._i2cWrite([cmds.ONE_WIRE_SINGLE_BIT, setHigh ? 0x80 : 0]))
+            .then(() => this._wait())
+            .then(resp => (resp & cmds.STATUS.SINGLE_BIT ? 1 : 0));
     }
 
     triplet(dir) {
-        this._wait(true);
-        this._i2cWrite(cmds.ONE_WIRE_TRIPLET, [dir ? 0x80 : 0]);
-        return this._wait();
-
+        return this._wait(true)
+            .then(() => this._i2cWrite([cmds.ONE_WIRE_TRIPLET, dir ? 0x80 : 0]))
+            .then(() => this._wait());
     }
 
     /*
@@ -478,113 +455,127 @@ class DS2482 {
      */
 
     _resetBridge() {
-        this._i2cWrite(cmds.DEVICE_RESET);
-        let resp = this._wait();
-        this.channel = 0;
-        return resp;
+        return this._i2cWrite([cmds.DEVICE_RESET])
+            .then(() => this._wait())
+            .then(resp => {
+                this.channel = 0;
+
+                return resp;
+            });
     }
 
     _resetWire() {
+        return this._wait(true)
+            .then(() => this._i2cWrite([cmds.ONE_WIRE_RESET]))
+            .then(() => this._wait())
+            .then(resp => {
+                if (resp & cmds.STATUS.SHORT) {
+                    throw Error('Detected onewire short');
+                }
 
-        this._wait(true);
-        this._i2cWrite(cmds.ONE_WIRE_RESET);
-        let resp = this._wait();
+                if (!(resp & cmds.STATUS.PRESENCE)) {
+                    throw Error('Failed to detected any onewire devices');
+                }
 
-        // trace("_resetWire: " + JSON.stringify(resp) + "\n");
-
-        if (resp & cmds.STATUS.SHORT) {
-            throw new Error('Detected onewire short');
-        }
-
-        if (!(resp & cmds.STATUS.PRESENCE)) {
-            throw new Error('Failed to detected any onewire devices');
-        }
-
-        return resp;
+                return resp;
+            });
     }
 
     _wait(setPointer) {
 
-        let reg = setPointer ? cmds.REGISTERS.STATUS : null;
-        let resp;
-        let t = Timer.set(() => {
-            throw new Error('Wait timeout');
-        }, 200);
+        let cancel_timeout = false;
 
-        do {
-            if (resp) {
-                reg = null;
-                Timer.delay(10);
-            }
-            try {
-                resp = this._readBridge(reg);
-            } catch (err) {
-                Timer.clear(t);
+        const checkBusy = reg => (
+            this._readBridge(reg)
+            .then(resp => {
+                // trace("@_wait: " + resp + "\n");
+                if (resp & cmds.STATUS.BUSY) {
+                    return this.timeout(50).then(() => checkBusy());
+                }
+
+                cancel_timeout = true;
+                return resp;
+            })
+            .catch ((err) => {
+                cancel_timeout = true;
                 throw err;
-            }
-        } while (resp & cmds.STATUS.BUSY)
+            })
+        );
 
-        Timer.clear(t);
-        return resp;
+        return Promise.race([
+            checkBusy(setPointer ? cmds.REGISTERS.STATUS : null),
+            this.timeout(200).then(() => {
+                if (!cancel_timeout)
+                    throw Error('Wait timeout');
+            }),
+        ]);
     }
 
     _readBridge(reg) {
+        const read = () => (
+            this._i2cRead().then(resp => {
+                // trace("@_readBridge Done: " + resp + "\n");
+                return (resp >>> 0) & 0xFF;
+            })
+        );
+
         if (reg) {
-            this._i2cWrite(cmds.SET_READ_POINTER, [reg]);
+            return this._i2cWrite([cmds.SET_READ_POINTER, reg]).then(read);
         }
 
-        let r = this._i2cRead();
-        return ((r >>> 0) & 0xFF)
+        return read();
     }
 
+    // 20221206 RDW
+    // Redefined on top to support ECMA-419 I2C.Async
 
-    _i2cWrite(cmd, bytes) {
+    // _i2cWrite(bytesArray) {
+    //     ...
+    // }
 
-        // trace("write: " + cmd + ", " + JSON.stringify(bytes) + "\n");
-
-        let args = [cmd];
-        if (bytes) {
-            if (Array.isArray(bytes)) {
-                args = args.concat(bytes);
-            } else if (bytes instanceof Buffer) {
-                args = args.concat(...bytes);
-            } else {
-                throw new TypeError("'bytes' of _i2cWrite is of type " + typeof (bytes) + ".");
-            }
-        }
-
-        // trace("write: " + JSON.stringify(Uint8Array.from(args)) + "\n");
-
-        // from: Moddable/moddable/modules/io/expander/expander.js
-        try {
-            this.i2c.write(Uint8Array.from(args).buffer, true);
-        } catch (e) {
-            throw new Error("I2C: Write failed.", e.fileName, e.lineNumber);
-        }
-    }
-
-    _i2cRead() {
-        let res;
-        try {
-            res = new Uint8Array(this.i2c.read(1, true));
-        } catch (e) {
-            throw new Error("I2C: Read failed.", e.fileName, e.lineNumber);
-        }
-        // trace("read: " + JSON.stringify(res) + "\n");
-        return res[0];
-    }
+    // _i2cRead() {
+    //     ...
+    // }
 
     /*
         1-Wire device access API by path
      */
 
-    // class generic {
+    // Simple & perhaps naive semaphore implementation
+    #lock = false;
 
-    //     paths = {
-    //         "not_implemented": []
-    //     }
+    #get_I2C_lock(timeout) {
 
-    // }
+        let cancel_timeout = false;
+
+        trace("Trying to acquire I2C lock...\n");
+
+        const checkLock = () => {
+            if (this.#lock) {
+                trace("I2C lock blocked!\n");
+                return this.timeout(50).then(() => checkLock());
+            }
+
+            this.#lock = true;
+            trace("I2C lock acquired\n");
+            cancel_timeout = true;
+            return Promise.resolve();
+        }
+
+        return Promise.race([
+            checkLock(),
+            this.timeout(timeout).then(() => {
+                if (!cancel_timeout)
+                    throw Error('Timeout: Could not acquire I2C lock.');
+            }),
+        ]);
+
+    }
+
+    #release_I2C_lock() {
+        this.#lock = false;
+        trace("I2C lock released\n");        
+    }
 
     #get_worker(family_code) {
 
@@ -618,93 +609,203 @@ class DS2482 {
         return Object.keys(worker?.paths)?.sort();
     }
 
-    get paths() {
-        let p = [];
-        this.#devices = this.search();
-        for (let d = 0, dl = this.#devices.length; d < dl; d++) {
-            let id = this.#devices[d];
-            // trace("id: " + id + "\n");
-            let family = id.substring(0, 2);
-            let worker = this.#get_worker(family);
+    // get paths() {
+    //     let p = [];
+    //     this.#devices = this.search();
+    //     trace(JSON.stringify(this.#devices) + "\n");
+    //     for (let d = 0, dl = this.#devices.length; d < dl; d++) {
+    //         let id = this.#devices[d];
+    //         // trace("id: " + id + "\n");
+    //         let family = id.substring(0, 2);
+    //         let worker = this.#get_worker(family);
 
-            let paths = this.#get_paths(worker) || [];
-            for (let i = 0, l = paths.length; i < l; i++) {
-                p.push(`${id.substring(0,2)}.${id.substring(2)}/${paths[i]}`);
-            }
-        }
-        return p.sort();
+    //         let paths = this.#get_paths(worker) || [];
+    //         for (let i = 0, l = paths.length; i < l; i++) {
+    //             p.push(`${id.substring(0,2)}.${id.substring(2)}/${paths[i]}`);
+    //         }
+    //     }
+    //     return p.sort();
+    // }
+
+    get paths() {
+        return new Promise((resolve, reject) => {
+
+            let p = [];
+
+            this.#get_I2C_lock(5000)
+            .then(() => this.search())
+            .then((devs) => {
+
+                this.#release_I2C_lock();
+
+                trace(`Devices found: ${JSON.stringify(devs)}\n`);
+
+                if (Array.isArray(devs)) {
+                    this.#devices = devs;
+
+                    for (let d = 0, dl = devs.length; d < dl; d++) {
+                        let id = devs[d];
+                        // trace("id: " + id + "\n");
+                        let family = id.substring(0, 2);
+                        let worker = this.#get_worker(family);
+            
+                        let paths = this.#get_paths(worker) || [];
+                        for (let i = 0, l = paths.length; i < l; i++) {
+                            p.push(`${id.substring(0,2)}.${id.substring(2)}/${paths[i]}`);
+                        }
+                    }        
+                }
+
+                return resolve(p.sort());
+            })
+            .catch((err) => {
+                this.#release_I2C_lock();
+                reject(err);
+            })
+        })
     }
 
     readPath(path) {
 
-        if (typeof (path) !== "string") {
-            throw new RangeError(`'${path}' is an invalid path.`)
-        }
+        return new Promise((resolve, reject) => {
 
-        path = path.toLowerCase();
+            if (typeof (path) !== "string") {
+                throw new RangeError(`'${path}' is an invalid path.`)
+            }
 
-        let pp = path.split("/");
-        let id = pp.shift();
+            path = path.toLowerCase();
 
-        if (!id || id.length < 16) {
-            throw new RangeError(`'${path}' is an invalid path.`)
-        }
+            let pp = path.split("/");
+            let id = pp.shift();
 
-        let family = id.substring(0, 2);
+            if (!id || id.length < 16) {
+                throw new RangeError(`'${path}' is an invalid path.`)
+            }
 
-        // accept 28.FFFFFFF...
-        // as well as 28FFFFFF...
-        if (id[2] === ".") {
-            id = family + id.substring(3);            
-        }
+            let family = id.substring(0, 2);
 
-        trace(id + "\n");
+            // accept 28.FFFFFFF...
+            // as well as 28FFFFFF...
+            if (id[2] === ".") {
+                id = family + id.substring(3);            
+            }
 
-        let worker = this.#get_worker(family);
+            // trace(id + "\n");
 
-        let read_fn = worker?.paths?.[pp.join("/")]?.[0];
-        return read_fn?.call(worker, this, id);
+            let worker = this.#get_worker(family);
+            let read_fn = worker?.paths?.[pp.join("/")]?.[0];
 
+            if (!read_fn) {
+                // trace("ds.readPath -> resolve(undefined)\n");
+                resolve(undefined);
+                return;
+            }
+
+            this.#get_I2C_lock(1000)
+            .then(() => read_fn.call(worker, this, id))
+            .then((result) => {
+                resolve(result);
+            })
+            .catch((err) => {
+                reject(err);
+            })
+            .finally(() => {
+                this.#release_I2C_lock();
+            });
+            return;
+
+        });
     }
 
     writePath(path, data) {
 
-        if (typeof (path) !== "string") {
-            throw new RangeError(`'${path}' is an invalid path.`)
-        }
+        return new Promise((resolve, reject) => {
 
-        path = path.toLowerCase();
+            if (typeof (path) !== "string") {
+                throw new RangeError(`'${path}' is an invalid path.`)
+            }
 
-        let pp = path.split("/");
-        let id = pp.shift();
+            path = path.toLowerCase();
 
-        if (!id || id.length < 8) {
-            throw new RangeError(`'${path}' is an invalid path.`)
-        }
+            let pp = path.split("/");
+            let id = pp.shift();
 
-        let family = id.substring(0, 2);
+            if (!id || id.length < 8) {
+                throw new RangeError(`'${path}' is an invalid path.`)
+            }
 
-        // accept 28.FFFFFFF...
-        // as well as 28FFFFFF...
-        if (id[2] === ".") {
-            id = family + id.substring(3);            
-        }
+            let family = id.substring(0, 2);
 
-        let worker = this.#get_worker(family);
+            // accept 28.FFFFFFF...
+            // as well as 28FFFFFF...
+            if (id[2] === ".") {
+                id = family + id.substring(3);            
+            }
 
-        let write_fn = worker?.paths?.[pp.join("/")]?.[1];
-        return write_fn?.call(worker, this, id, data);
+            let worker = this.#get_worker(family);
+            let write_fn = worker?.paths?.[pp.join("/")]?.[1];
+
+            if (!write_fn) {
+                // trace("ds.writePath -> resolve(undefined)\n");
+                resolve(undefined);
+                return;
+            }
+
+            this.#get_I2C_lock(1000)
+            .then(() => write_fn.call(worker, this, id, data))
+            .then((result) => {
+                resolve(result);
+            })
+            .catch((err) => {
+                reject(err);
+            })
+            .finally(() => {
+                this.#release_I2C_lock();
+            });
+            return;
+        });
     }
 
-    checkCRC(buffer, length) {
-        return utils.checkCRC(buffer, length);
-    }
+
+        // Utility functions - that can be used by device drivers
+
+        timeout(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        crc8(uint8arr) {
+
+            // definition by @moddable
+            // 	{ poly: 0x31, init: 0x00, res: 0xA1, refIn: true,  refOut: true,  xorOut: 0x00, name: "CRC-8/MAXIM" },
+            let crc = new CRC8(0x31, 0x00, true, true, 0x00);
+    
+            // crc.reset();
+            return crc.checksum(uint8arr);
+        }
+    
+        crc16(uint8arr) {
+    
+            // definition by @moddable
+            // { poly: 0x8005, init: 0x0000, res: 0x44C2, refIn: true,  refOut: true,  xorOut: 0xFFFF, name: "CRC-16/MAXIM" },
+            let crc = new CRC16(0x8005, 0, true, true, 0xFFFF);
+    
+            // crc.reset();
+            return crc.checksum(uint8arr);
+        }
+    
+        readUInt16LE(uint8arr, offset) {
+            offset = offset >>> 0
+            return uint8arr[offset] | (uint8arr[offset + 1] << 8)
+        }
+    
+        readInt16LE(uint8arr, offset) {
+            offset = offset >>> 0
+            const val = uint8arr[offset] | (uint8arr[offset + 1] << 8)
+            return (val & 0x8000) ? val | 0xFFFF0000 : val
+        }
+
+
+    
 }
 
-// Object.assign(DS2482, {
-//     ROM_SIZE,
-//     checkCRC: utils.checkCRC,
-// });
-
-// module.exports = DS2482;
 export { DS2482 };

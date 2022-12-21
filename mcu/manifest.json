@@ -1,16 +1,35 @@
 {
 	"include": [
-		"../devices/manifest.json"
+		"../devices/manifest.json",
+		"$(MODULES)/data/hex/manifest.json",
+		"$(MODULES)/data/crc/manifest.json"
 	],
 	"modules": {
 		"*": [
 			"./node",
 			"./ds2482",
-			"./commands",
-			"./buffer"
+			"./commands"
 		]
 	},
 	"preload": [
-		"node"
-	]
+		"node",
+		"commands",
+		"ds2482"
+	],
+	"platforms": {
+		"esp32": {
+			"config": {
+				"i2c": {
+					"async": true
+				}
+			}
+		},
+		"...": {
+			"config": {
+				"i2c": {
+					"async": false
+				}
+			}
+		}
+	}
 }
