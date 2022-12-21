@@ -1,6 +1,6 @@
 {
   "name": "@ralphwetzel/node-red-ds2482-mcu",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "DS2482 I2C 1-Wire Master controller for Node-RED w/ MCU support",
   "main": "ds2482.js",
   "scripts": {
@@ -24,6 +24,8 @@
   },
   "keywords": [
     "node-red",
+    "node-red-mcu",
+    "node-red-mcu-plugin",
     "MCU",
     "DS2482",
     "I2C",
